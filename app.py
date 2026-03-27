@@ -76,6 +76,11 @@ def enrich_daily(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
+    df = df.copy()
+
+    if "date" in df.columns:
+        df["month"] = df["date"].dt.to_period("M").dt.to_timestamp()
+
     if "close" in df.columns:
         if "return_1d" not in df.columns:
             df["return_1d"] = df["close"].pct_change()
@@ -92,18 +97,19 @@ def enrich_daily(df: pd.DataFrame) -> pd.DataFrame:
         df["drawdown"] = df["close"] / df["cum_max_close"] - 1
         df["distance_to_52w_high"] = df["close"] / df["close"].rolling(252, min_periods=1).max() - 1
 
+        if "month" in df.columns:
+            monthly_return_map = (
+                df.groupby("month")["close"]
+                .agg(first_close="first", last_close="last")
+                .assign(monthly_return=lambda x: x["last_close"] / x["first_close"] - 1)["monthly_return"]
+            )
+            df["monthly_return"] = df["month"].map(monthly_return_map)
+        else:
+            df["monthly_return"] = pd.NA
+
     if "volume" in df.columns:
         df["avg_volume_20d"] = df["volume"].rolling(20).mean()
         df["volume_ratio_20d"] = df["volume"] / df["avg_volume_20d"]
-
-    month_key = df["date"].dt.to_period("M").dt.to_timestamp()
-    monthly = (
-        df.assign(month=month_key)
-        .groupby("month", as_index=False)
-        .agg(first_close=("close", "first"), last_close=("close", "last"))
-    )
-    monthly["monthly_return"] = monthly["last_close"] / monthly["first_close"] - 1
-    df = df.merge(monthly[["month", "monthly_return"]], on="month", how="left")
 
     return df
 
