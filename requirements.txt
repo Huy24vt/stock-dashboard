@@ -1,6 +1,6 @@
-vnstock
-pandas
-openpyxl
-jupyter
-streamlit
-plotly
+vnstock==3.5.0
+pandas>=2.2,<3
+openpyxl>=3.1,<4
+streamlit>=1.40,<2
+altair<6
+plotly>=5,<7
