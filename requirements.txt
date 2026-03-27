@@ -1,0 +1,6 @@
+vnstock
+pandas
+openpyxl
+jupyter
+streamlit
+plotly
