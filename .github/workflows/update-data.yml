@@ -2,11 +2,22 @@ name: update-stock-data
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 9-10 * * 1-5"
+      timezone: "Asia/Ho_Chi_Minh"
+    - cron: "2,7,12,17,22,27 11 * * 1-5"
+      timezone: "Asia/Ho_Chi_Minh"
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 13 * * 1-5"
+      timezone: "Asia/Ho_Chi_Minh"
+    - cron: "2,7,12,17,22,27,32,37,42 14 * * 1-5"
+      timezone: "Asia/Ho_Chi_Minh"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: update-stock-data-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   update:
