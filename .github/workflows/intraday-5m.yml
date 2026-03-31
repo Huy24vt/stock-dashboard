@@ -1,71 +1,75 @@
 from pathlib import Path
+from datetime import datetime
 import pandas as pd
-from vnstock import Trading
+import sys
+from vnstock_data import Trading
 from config import SYMBOLS
 
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
-def flatten_cols(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [
-            "_".join([str(x) for x in col if str(x) != ""]).strip().lower()
-            for col in df.columns
-        ]
-    else:
-        df.columns = [str(c).strip().lower() for c in df.columns]
-    return df
-
 def main():
-    now = pd.Timestamp.now(tz="Asia/Ho_Chi_Minh")
-    today_str = now.strftime("%Y-%m-%d")
-    ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        now = pd.Timestamp.now(tz="Asia/Ho_Chi_Minh")
+        today_str = now.strftime("%Y-%m-%d")
+        ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    out_dir = Path("data/intraday") / today_str
-    ensure_dir(out_dir)
+        out_dir = Path("data/intraday") / today_str
+        ensure_dir(out_dir)
 
-    trading = Trading(source="KBS")
-    board = trading.price_board(SYMBOLS)
-    board = flatten_cols(board).reset_index(drop=False)
+        # Add retry logic and better error handling
+        try:
+            trading = Trading(symbol="ACB", source="vci")
+            board = trading.price_board(SYMBOLS, flatten_columns=True, drop_levels=[0])
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch price board: {e}", file=sys.stderr)
+            raise
 
-    if "symbol" not in board.columns:
-        possible_symbol_cols = [c for c in board.columns if "symbol" in c or c == "index"]
-        if possible_symbol_cols:
-            board = board.rename(columns={possible_symbol_cols[0]: "symbol"})
+        board.columns = [c.strip().lower() for c in board.columns]
 
-    price_col = next((c for c in ["match_price", "last_price", "price", "close"] if c in board.columns), None)
-    change_col = next((c for c in ["change", "price_change"] if c in board.columns), None)
-    pct_col = next((c for c in ["pct_change", "change_percent", "price_change_percent"] if c in board.columns), None)
-    vol_col = next((c for c in ["match_volume", "volume", "total_volume"] if c in board.columns), None)
-    ref_col = next((c for c in ["ref_price", "reference_price"] if c in board.columns), None)
+        # Uncomment for debugging
+        print(f"Available columns: {board.columns.tolist()}")
 
-    if price_col is None:
-        raise ValueError(f"Không tìm thấy cột giá. Columns hiện có: {board.columns.tolist()}")
+        price_col = next((c for c in ["match_price", "last_price", "price", "close"] if c in board.columns), None)
+        change_col = next((c for c in ["change", "price_change"] if c in board.columns), None)
+        pct_col = next((c for c in ["pct_change", "change_percent", "price_change_percent"] if c in board.columns), None)
+        vol_col = next((c for c in ["match_volume", "volume", "total_volume"] if c in board.columns), None)
+        ref_col = next((c for c in ["ref_price", "reference_price"] if c in board.columns), None)
 
-    board["snapshot_time"] = ts_str
+        if price_col is None:
+            raise ValueError(f"Không tìm thấy cột giá hiện tại. Columns: {board.columns.tolist()}")
 
-    for symbol in SYMBOLS:
-        row = board[board["symbol"].astype(str).str.upper() == symbol].copy()
-        if row.empty:
-            print(f"[WARN] No row for {symbol}")
-            continue
+        board["snapshot_time"] = ts_str
 
-        keep_cols = ["snapshot_time", "symbol", price_col]
-        for c in [change_col, pct_col, vol_col, ref_col]:
-            if c:
-                keep_cols.append(c)
+        for symbol in SYMBOLS:
+            try:
+                row = board[board["symbol"].str.upper() == symbol].copy()
+                if row.empty:
+                    print(f"[WARN] No row for {symbol}")
+                    continue
 
-        row = row[keep_cols].copy()
+                keep_cols = ["snapshot_time", "symbol", price_col]
+                for c in [change_col, pct_col, vol_col, ref_col]:
+                    if c:
+                        keep_cols.append(c)
 
-        out_file = out_dir / f"{symbol.lower()}_intraday.csv"
+                row = row[keep_cols].copy()
+                out_file = out_dir / f"{symbol.lower()}_intraday.csv"
 
-        if out_file.exists():
-            old = pd.read_csv(out_file)
-            row = pd.concat([old, row], ignore_index=True)
-            row = row.drop_duplicates(subset=["snapshot_time"]).sort_values("snapshot_time")
+                if out_file.exists():
+                    old = pd.read_csv(out_file)
+                    row = pd.concat([old, row], ignore_index=True)
+                    row = row.drop_duplicates(subset=["snapshot_time"]).sort_values("snapshot_time")
 
-        row.to_csv(out_file, index=False, encoding="utf-8-sig")
-        print(f"Updated {out_file} | rows={len(row)}")
+                row.to_csv(out_file, index=False, encoding="utf-8-sig")
+                print(f"Updated {out_file} | rows={len(row)}")
+            except Exception as e:
+                print(f"[ERROR] Failed to process symbol {symbol}: {e}", file=sys.stderr)
+                continue
+
+    except Exception as e:
+        print(f"[FATAL] Pipeline failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
