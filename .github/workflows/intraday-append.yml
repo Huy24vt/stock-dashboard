@@ -1,0 +1,41 @@
+name: Append intraday price every 5 minutes
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  append-intraday:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Check Vietnam trading hours and exit if outside
+        run: |
+          now=$(TZ='Asia/Ho_Chi_Minh' date +'%H:%M')
+          hour=${now:0:2}
+          minute=${now:3:2}
+          mins=$((10#$hour*60 + 10#$minute))
+          start1=$((9*60))
+          end1=$((11*60+30))
+          start2=$((13*60))
+          end2=$((15*60))
+          if [ $mins -lt $start1 ] || { [ $mins -gt $end1 ] && [ $mins -lt $start2 ]; } || [ $mins -gt $end2 ]; then
+            echo "Outside trading hours ($now). Exiting."
+            exit 0
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install vnstock vnstock-data || true
+
+      - name: Run intraday append
+        run: python src/update_intraday_snapshots.py
