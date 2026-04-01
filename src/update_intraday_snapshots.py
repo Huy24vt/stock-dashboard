@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
+import sys
 
 # `vnstock_data` may be provided by a separate package. Try a safe import
 try:
@@ -8,13 +9,11 @@ try:
 except Exception:
     Trading = None
 
-if Trading is None:
-    raise ImportError(
-        "Missing dependency: module 'vnstock_data' not found.\n"
-        "Please install the package that provides it (for example, add 'vnstock-data' to requirements.txt and run pip install -r requirements.txt)."
-    )
-
 from config import SYMBOLS
+
+if Trading is None:
+    print("[WARN] vnstock_data not available — skipping intraday snapshot step.")
+    sys.exit(0)
 
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
