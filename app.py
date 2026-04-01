@@ -21,6 +21,12 @@ DAILY_DIR = Path("data/daily")
 INTRADAY_DIR = Path("data/intraday")
 FALLBACK_SYMBOLS = ["ACB", "FPT", "HPG"]
 DEFAULT_COMPARE_COUNT = 5
+PLOT_CONFIG = {
+    "scrollZoom": True,
+    "displaylogo": False,
+    "responsive": True,
+    "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"],
+}
 
 # =========================
 # UI STYLE
@@ -36,28 +42,6 @@ st.markdown(
     .small-note {
         color: #8b95a7;
         font-size: 0.9rem;
-    }
-    div[data-testid="stMetric"] {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(255,255,255,0.08);
-        padding: 0.8rem 0.9rem;
-        border-radius: 16px;
-    }
-    .insight-box {
-        padding: 0.9rem 1rem;
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 16px;
-        background: rgba(255,255,255,0.02);
-        margin-bottom: 0.6rem;
-    }
-    .insight-title {
-        font-size: 0.88rem;
-        color: #9aa4b2;
-        margin-bottom: 0.2rem;
-    }
-    .insight-value {
-        font-size: 1.05rem;
-        font-weight: 700;
     }
     </style>
     """,
@@ -194,8 +178,6 @@ def enrich_daily(df: pd.DataFrame) -> pd.DataFrame:
         df["52w_low"] = df["close"].rolling(252, min_periods=1).min()
         df["distance_to_52w_high"] = df["close"] / df["52w_high"] - 1
         df["distance_to_52w_low"] = df["close"] / df["52w_low"] - 1
-        df["rolling_high_20"] = df["close"].rolling(20, min_periods=1).max()
-        df["rolling_low_20"] = df["close"].rolling(20, min_periods=1).min()
 
         monthly_return_map = (
             df.groupby("month")["close"]
@@ -318,35 +300,8 @@ def choose_intraday_vol_col(df: pd.DataFrame):
     return None
 
 
-def apply_date_filter(df: pd.DataFrame, preset: str, custom_range):
-    if df.empty:
-        return df, None, None
-
-    max_date = df["date"].max().date()
-
-    if preset == "1M":
-        start_date = (df["date"].max() - pd.Timedelta(days=30)).date()
-    elif preset == "3M":
-        start_date = (df["date"].max() - pd.Timedelta(days=90)).date()
-    elif preset == "6M":
-        start_date = (df["date"].max() - pd.Timedelta(days=180)).date()
-    elif preset == "YTD":
-        start_date = pd.Timestamp(year=df["date"].max().year, month=1, day=1).date()
-    elif preset == "1Y":
-        start_date = (df["date"].max() - pd.Timedelta(days=365)).date()
-    elif preset == "2Y":
-        start_date = (df["date"].max() - pd.Timedelta(days=730)).date()
-    elif preset == "Custom":
-        start_date, max_date = custom_range
-    else:
-        start_date = df["date"].min().date()
-
-    out = df[(df["date"].dt.date >= start_date) & (df["date"].dt.date <= max_date)].copy()
-    return out, start_date, max_date
-
-
 # =========================
-# FORMATTERS & TEXT
+# FORMATTERS & TABLES
 # =========================
 def fmt_pct(x):
     if x is None or pd.isna(x):
@@ -383,68 +338,6 @@ def safe_last(df: pd.DataFrame, col: str):
     return None if pd.isna(val) else val
 
 
-def score_signal(df: pd.DataFrame) -> dict[str, str]:
-    if df.empty:
-        return {"Trend": "-", "Momentum": "-", "Volume": "-", "Risk": "-"}
-
-    last = df.iloc[-1]
-    close = last.get("close")
-    ma20 = last.get("ma_20")
-    ma50 = last.get("ma_50")
-    rsi = last.get("rsi_14")
-    macd = last.get("macd")
-    macd_signal = last.get("macd_signal")
-    vol_ratio = last.get("volume_ratio_20d")
-    dd = last.get("drawdown")
-    vol = last.get("rolling_volatility_20d")
-
-    if pd.notna(close) and pd.notna(ma20) and pd.notna(ma50):
-        if close > ma20 > ma50:
-            trend = "Bullish"
-        elif close < ma20 < ma50:
-            trend = "Bearish"
-        else:
-            trend = "Sideways"
-    else:
-        trend = "-"
-
-    if pd.notna(rsi) and pd.notna(macd) and pd.notna(macd_signal):
-        if rsi >= 70:
-            momentum = "Overbought"
-        elif rsi <= 30:
-            momentum = "Oversold"
-        elif macd > macd_signal and rsi >= 50:
-            momentum = "Positive"
-        elif macd < macd_signal and rsi < 50:
-            momentum = "Weak"
-        else:
-            momentum = "Neutral"
-    else:
-        momentum = "-"
-
-    if pd.notna(vol_ratio):
-        if vol_ratio >= 1.8:
-            volume = "Volume spike"
-        elif vol_ratio >= 1.1:
-            volume = "Above average"
-        else:
-            volume = "Normal"
-    else:
-        volume = "-"
-
-    if pd.notna(dd) and pd.notna(vol):
-        if dd <= -0.2 or vol >= 40:
-            risk = "High"
-        elif dd <= -0.1 or vol >= 25:
-            risk = "Medium"
-        else:
-            risk = "Low"
-    else:
-        risk = "-"
-
-    return {"Trend": trend, "Momentum": momentum, "Volume": volume, "Risk": risk}
-
-
 def monthly_pivot(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "monthly_return" not in df.columns:
         return pd.DataFrame()
@@ -473,17 +366,18 @@ def summary_table(df: pd.DataFrame) -> pd.DataFrame:
     avg_volume = df["volume"].mean() if "volume" in df.columns else None
     return pd.DataFrame(
         [
+            {"Metric": "Latest Close", "Value": fmt_num(safe_last(df, 'close'))},
+            {"Metric": "1D Return", "Value": fmt_pct(calc_return(df, 1))},
+            {"Metric": "20D Return", "Value": fmt_pct(calc_return(df, 20))},
+            {"Metric": "YTD Return", "Value": fmt_pct(safe_last(df, 'ret_ytd'))},
             {"Metric": "Period Return", "Value": fmt_pct(period_ret)},
             {"Metric": "Period High", "Value": fmt_num(high)},
             {"Metric": "Period Low", "Value": fmt_num(low)},
             {"Metric": "Trading Days", "Value": len(df)},
             {"Metric": "Average Volume", "Value": fmt_num(avg_volume, 0)},
-            {"Metric": "Best Day", "Value": fmt_pct(df["return_1d"].max()) if "return_1d" in df.columns else "-"},
-            {"Metric": "Worst Day", "Value": fmt_pct(df["return_1d"].min()) if "return_1d" in df.columns else "-"},
-            {
-                "Metric": "Latest Vol Ratio vs 20D",
-                "Value": fmt_num(df["volume_ratio_20d"].iloc[-1], 2) if "volume_ratio_20d" in df.columns else "-",
-            },
+            {"Metric": "RSI 14", "Value": fmt_num(safe_last(df, 'rsi_14'), 2)},
+            {"Metric": "20D Volatility", "Value": fmt_pct_value(safe_last(df, 'rolling_volatility_20d'))},
+            {"Metric": "Max Drawdown", "Value": fmt_pct(df['drawdown'].min()) if 'drawdown' in df.columns else '-'},
         ]
     )
 
@@ -506,15 +400,16 @@ def technical_snapshot(df: pd.DataFrame) -> pd.DataFrame:
             if pd.notna(last.get("close")) and pd.notna(last.get("ma_50")) and last.get("ma_50") != 0
             else "-",
         },
+        {"Metric": "Close vs MA200", "Value": fmt_pct(last["close"] / last["ma_200"] - 1) if pd.notna(last.get("close")) and pd.notna(last.get("ma_200")) and last.get("ma_200") != 0 else "-"},
         {"Metric": "RSI 14", "Value": fmt_num(last.get("rsi_14"), 2)},
         {"Metric": "MACD", "Value": fmt_num(last.get("macd"), 3)},
         {"Metric": "MACD Signal", "Value": fmt_num(last.get("macd_signal"), 3)},
         {"Metric": "ATR 14", "Value": fmt_num(last.get("atr_14"), 2)},
+        {"Metric": "Vol Ratio 20D", "Value": fmt_num(last.get("volume_ratio_20d"), 2)},
         {"Metric": "20D Volatility", "Value": fmt_pct_value(last.get("rolling_volatility_20d"))},
         {"Metric": "52W High", "Value": fmt_num(last.get("52w_high"))},
         {"Metric": "52W Low", "Value": fmt_num(last.get("52w_low"))},
         {"Metric": "Distance to 52W High", "Value": fmt_pct(last.get("distance_to_52w_high"))},
-        {"Metric": "Max Drawdown", "Value": fmt_pct(df["drawdown"].min()) if "drawdown" in df.columns else "-"},
     ]
     return pd.DataFrame(rows)
 
@@ -527,11 +422,16 @@ def base_layout(fig: go.Figure, height: int):
         height=height,
         margin=dict(l=20, r=20, t=70, b=20),
         hovermode="x unified",
+        dragmode="pan",
         legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0),
     )
     fig.update_xaxes(automargin=True, tickformat="%b\n%Y", nticks=8, showgrid=False)
     fig.update_yaxes(automargin=True)
     return fig
+
+
+def plot_chart(fig: go.Figure, key: str | None = None):
+    st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG, key=key)
 
 
 def build_price_chart(
@@ -587,7 +487,7 @@ def build_price_chart(
         if show and col in df.columns:
             fig.add_trace(go.Scatter(x=df["date"], y=df[col], mode="lines", name=label), row=1, col=1)
 
-    if show_bollinger and all(c in df.columns for c in ["bb_upper", "bb_mid", "bb_lower"]):
+    if show_bollinger and all(c in df.columns for c in ["bb_upper", "bb_lower"]):
         fig.add_trace(go.Scatter(x=df["date"], y=df["bb_upper"], mode="lines", name="BB Upper", opacity=0.6), row=1, col=1)
         fig.add_trace(go.Scatter(x=df["date"], y=df["bb_lower"], mode="lines", name="BB Lower", opacity=0.6), row=1, col=1)
 
@@ -728,17 +628,17 @@ def build_intraday_chart(df: pd.DataFrame):
         height=560 if vol_col else 420,
         margin=dict(l=20, r=20, t=60, b=20),
         hovermode="x unified",
+        dragmode="pan",
         legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0),
     )
     return fig
 
 
-def build_compare_chart(symbols: list[str], preset: str, custom_range):
+def build_compare_chart(symbols: list[str]):
     fig = go.Figure()
     for symbol in symbols:
         df = load_daily(symbol)
-        filtered, _, _ = apply_date_filter(df, preset, custom_range)
-        filtered = filtered.dropna(subset=["close"]).copy()
+        filtered = df.dropna(subset=["close"]).copy()
         if filtered.empty:
             continue
         base = filtered["close"].iloc[0]
@@ -750,12 +650,11 @@ def build_compare_chart(symbols: list[str], preset: str, custom_range):
     return base_layout(fig, 430)
 
 
-def build_correlation_heatmap(symbols: list[str], preset: str, custom_range):
+def build_correlation_heatmap(symbols: list[str]):
     merged = None
     for symbol in symbols:
         df = load_daily(symbol)
-        filtered, _, _ = apply_date_filter(df, preset, custom_range)
-        temp = filtered[["date", "return_1d"]].rename(columns={"return_1d": symbol})
+        temp = df[["date", "return_1d"]].rename(columns={"return_1d": symbol})
         merged = temp if merged is None else merged.merge(temp, on="date", how="outer")
 
     if merged is None or merged.empty:
@@ -797,28 +696,10 @@ st.sidebar.markdown("## Bộ lọc")
 
 selected_symbol = st.sidebar.selectbox("Chọn mã", SYMBOLS, index=0)
 
-selected_daily_for_bounds = load_daily(selected_symbol)
-if selected_daily_for_bounds.empty:
+selected_daily_for_check = load_daily(selected_symbol)
+if selected_daily_for_check.empty:
     st.error(f"Không tìm thấy dữ liệu daily cho mã {selected_symbol}.")
     st.stop()
-
-min_date = selected_daily_for_bounds["date"].min().date()
-max_date = selected_daily_for_bounds["date"].max().date()
-default_start = max(min_date, (selected_daily_for_bounds["date"].max() - pd.Timedelta(days=180)).date())
-
-st.sidebar.markdown("### Thời gian")
-preset = st.sidebar.radio(
-    "Khoảng thời gian",
-    ["1M", "3M", "6M", "YTD", "1Y", "2Y", "All", "Custom"],
-    index=2,
-)
-custom_range = st.sidebar.date_input(
-    "Custom range",
-    value=(default_start, max_date),
-    min_value=min_date,
-    max_value=max_date,
-    disabled=(preset != "Custom"),
-)
 
 st.sidebar.markdown("### Tùy chọn chart")
 chart_type = st.sidebar.radio("Kiểu chart giá", ["Candlestick", "Line"], index=0)
@@ -840,14 +721,17 @@ if st.sidebar.button("🔄 Refresh data ngay"):
     st.cache_data.clear()
     st.rerun()
 
-st.sidebar.markdown("<div class='small-note'>Dữ liệu được cache 5 phút. Nút refresh sẽ xóa cache và tải lại file CSV mới nhất.</div>", unsafe_allow_html=True)
+st.sidebar.markdown(
+    "<div class='small-note'>Cuộn chuột trên chart để zoom in / zoom out. Giữ chuột và kéo để pan. Double click để reset vùng nhìn.</div>",
+    unsafe_allow_html=True,
+)
 
 
 # =========================
 # HEADER
 # =========================
 st.title("📈 VN Stock Dashboard Pro")
-st.caption("Dashboard tập trung vào price action, technical signals, risk, intraday và watchlist so sánh.")
+st.caption("Bản gọn hơn cho phân tích chứng khoán: bỏ lọc thời gian, bỏ score cards, tập trung vào chart và bảng dữ liệu.")
 
 
 # =========================
@@ -856,99 +740,66 @@ st.caption("Dashboard tập trung vào price action, technical signals, risk, in
 @st.fragment(run_every="5m")
 def render_dashboard():
     daily_df = load_daily(selected_symbol)
-    daily_filtered, filter_start, filter_end = apply_date_filter(daily_df, preset, custom_range)
     intraday_df, intraday_folder = load_intraday(selected_symbol)
 
-    if daily_filtered.empty:
-        st.warning("Không có dữ liệu trong khoảng thời gian đã chọn.")
+    if daily_df.empty:
+        st.warning("Không có dữ liệu daily cho mã đã chọn.")
         return
 
-    last_date = daily_filtered["date"].max().strftime("%Y-%m-%d")
+    first_date = daily_df["date"].min().strftime("%Y-%m-%d")
+    last_date = daily_df["date"].max().strftime("%Y-%m-%d")
+    latest_close = safe_last(daily_df, "close")
     st.markdown(
-        f"**Mã đang xem:** {selected_symbol} &nbsp;&nbsp;|&nbsp;&nbsp; **Daily range:** {filter_start} → {filter_end} &nbsp;&nbsp;|&nbsp;&nbsp; **Latest daily:** {last_date}"
+        f"**Mã đang xem:** {selected_symbol} &nbsp;&nbsp;|&nbsp;&nbsp; **Data range:** {first_date} → {last_date} &nbsp;&nbsp;|&nbsp;&nbsp; **Latest close:** {fmt_num(latest_close)}"
     )
-
-    latest_close = safe_last(daily_filtered, "close")
-    prev_close = daily_filtered["close"].iloc[-2] if len(daily_filtered) >= 2 else None
-    day_change_abs = latest_close - prev_close if latest_close is not None and prev_close is not None else None
-    ret_1d = calc_return(daily_filtered, 1)
-    ret_5d = calc_return(daily_filtered, 5)
-    ret_20d = calc_return(daily_filtered, 20)
-    period_ret = (daily_filtered["close"].iloc[-1] / daily_filtered["close"].iloc[0] - 1) if len(daily_filtered) >= 2 else None
-    avg_volume = daily_filtered["volume"].tail(20).mean() if "volume" in daily_filtered.columns else None
-    rolling_vol = safe_last(daily_filtered, "rolling_volatility_20d")
-    max_dd = daily_filtered["drawdown"].min() if "drawdown" in daily_filtered.columns else None
-    rsi = safe_last(daily_filtered, "rsi_14")
-    atr = safe_last(daily_filtered, "atr_14")
-    vol_ratio = safe_last(daily_filtered, "volume_ratio_20d")
-
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Latest Close", fmt_num(latest_close), delta=fmt_num(day_change_abs) if day_change_abs is not None else None)
-    c2.metric("1D Return", fmt_pct(ret_1d))
-    c3.metric("5D Return", fmt_pct(ret_5d))
-    c4.metric("20D Return", fmt_pct(ret_20d))
-    c5.metric("Period Return", fmt_pct(period_ret))
-    c6.metric("Avg Vol (20D)", fmt_num(avg_volume, 0))
-
-    c7, c8, c9, c10 = st.columns(4)
-    c7.metric("RSI 14", fmt_num(rsi, 2))
-    c8.metric("ATR 14", fmt_num(atr, 2))
-    c9.metric("20D Volatility", fmt_pct_value(rolling_vol))
-    c10.metric("Max Drawdown", fmt_pct(max_dd))
-
-    signals = score_signal(daily_filtered)
-    s1, s2, s3, s4 = st.columns(4)
-    s1.markdown(f"<div class='insight-box'><div class='insight-title'>Trend</div><div class='insight-value'>{signals['Trend']}</div></div>", unsafe_allow_html=True)
-    s2.markdown(f"<div class='insight-box'><div class='insight-title'>Momentum</div><div class='insight-value'>{signals['Momentum']}</div></div>", unsafe_allow_html=True)
-    s3.markdown(f"<div class='insight-box'><div class='insight-title'>Volume</div><div class='insight-value'>{signals['Volume']}</div></div>", unsafe_allow_html=True)
-    s4.markdown(f"<div class='insight-box'><div class='insight-title'>Risk</div><div class='insight-value'>{signals['Risk']}</div></div>", unsafe_allow_html=True)
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Overview", "Technical", "Intraday", "Compare", "Watchlist", "Data"])
 
     with tab1:
         st.markdown("### Price & Volume")
-        st.plotly_chart(
-            build_price_chart(daily_filtered, chart_type, show_ma5, show_ma20, show_ma50, show_ma200, show_bollinger),
-            use_container_width=True,
+        plot_chart(
+            build_price_chart(daily_df, chart_type, show_ma5, show_ma20, show_ma50, show_ma200, show_bollinger),
+            key="price_chart",
         )
 
         row1_left, row1_right = st.columns(2)
         with row1_left:
             st.markdown("### Daily Return")
-            st.plotly_chart(build_return_chart(daily_filtered), use_container_width=True)
+            plot_chart(build_return_chart(daily_df), key="return_chart")
         with row1_right:
             st.markdown("### Monthly Return")
-            st.plotly_chart(build_monthly_return_chart(daily_filtered), use_container_width=True)
+            plot_chart(build_monthly_return_chart(daily_df), key="monthly_return_chart")
 
         row2_left, row2_right = st.columns(2)
         with row2_left:
             st.markdown("### Drawdown")
-            st.plotly_chart(build_drawdown_chart(daily_filtered), use_container_width=True)
+            plot_chart(build_drawdown_chart(daily_df), key="drawdown_chart")
         with row2_right:
             st.markdown("### Volatility (20D)")
-            st.plotly_chart(build_volatility_chart(daily_filtered), use_container_width=True)
+            plot_chart(build_volatility_chart(daily_df), key="volatility_chart")
 
         row3_left, row3_right = st.columns(2)
         with row3_left:
             st.markdown("### Snapshot")
-            st.dataframe(technical_snapshot(daily_filtered), use_container_width=True, hide_index=True)
+            st.dataframe(technical_snapshot(daily_df), use_container_width=True, hide_index=True)
         with row3_right:
-            st.markdown("### Period Summary")
-            st.dataframe(summary_table(daily_filtered), use_container_width=True, hide_index=True)
+            st.markdown("### Summary")
+            st.dataframe(summary_table(daily_df), use_container_width=True, hide_index=True)
 
     with tab2:
         col_left, col_right = st.columns(2)
         with col_left:
             st.markdown("### RSI")
-            st.plotly_chart(build_rsi_chart(daily_filtered), use_container_width=True)
+            plot_chart(build_rsi_chart(daily_df), key="rsi_chart")
         with col_right:
             st.markdown("### Return Distribution")
-            st.plotly_chart(build_return_distribution(daily_filtered.dropna(subset=["return_1d"])), use_container_width=True)
+            dist_df = daily_df.dropna(subset=["return_1d"]) if "return_1d" in daily_df.columns else daily_df
+            plot_chart(build_return_distribution(dist_df), key="return_distribution_chart")
 
         st.markdown("### MACD")
-        st.plotly_chart(build_macd_chart(daily_filtered), use_container_width=True)
+        plot_chart(build_macd_chart(daily_df), key="macd_chart")
 
-        monthly_tbl = monthly_pivot(daily_filtered)
+        monthly_tbl = monthly_pivot(daily_df)
         if not monthly_tbl.empty:
             display_monthly = monthly_tbl.applymap(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "")
             st.markdown("### Monthly Heatmap Table")
@@ -960,33 +811,13 @@ def render_dashboard():
             st.info("Chưa có dữ liệu intraday.")
         else:
             st.caption(f"File intraday mới nhất: {intraday_folder}")
-
-            intraday_price_col = choose_intraday_price_col(intraday_df)
-            intraday_pct_col = choose_intraday_pct_col(intraday_df)
-            intraday_vol_col = choose_intraday_vol_col(intraday_df)
-
-            col_a, col_b, col_c, col_d = st.columns(4)
-            last_intraday_price = intraday_df[intraday_price_col].iloc[-1] if intraday_price_col else None
-            last_intraday_pct = (
-                intraday_df[intraday_pct_col].iloc[-1] / 100
-                if intraday_pct_col and intraday_pct_col in intraday_df.columns
-                else None
-            )
-            last_intraday_time = intraday_df["snapshot_time"].iloc[-1] if "snapshot_time" in intraday_df.columns else None
-            last_intraday_volume = intraday_df[intraday_vol_col].iloc[-1] if intraday_vol_col else None
-
-            col_a.metric("Latest Intraday Price", fmt_num(last_intraday_price))
-            col_b.metric("Intraday Change %", fmt_pct(last_intraday_pct))
-            col_c.metric("Last Snapshot", str(last_intraday_time))
-            col_d.metric("Latest Intraday Volume", fmt_num(last_intraday_volume, 0))
-
-            st.plotly_chart(build_intraday_chart(intraday_df), use_container_width=True)
+            plot_chart(build_intraday_chart(intraday_df), key="intraday_chart")
             st.dataframe(intraday_df.tail(50), use_container_width=True, hide_index=True)
 
     with tab4:
         st.markdown("### Relative Performance")
         if compare_symbols:
-            st.plotly_chart(build_compare_chart(compare_symbols, preset, custom_range), use_container_width=True)
+            plot_chart(build_compare_chart(compare_symbols), key="compare_chart")
         else:
             st.warning("Hãy chọn ít nhất 1 mã để compare.")
 
@@ -996,20 +827,18 @@ def render_dashboard():
             compare_rows = []
             for symbol in compare_symbols:
                 temp = load_daily(symbol)
-                temp_filtered, _, _ = apply_date_filter(temp, preset, custom_range)
-                if temp_filtered.empty or "close" not in temp_filtered.columns:
+                if temp.empty or "close" not in temp.columns:
                     continue
-                last = temp_filtered.iloc[-1]
+                last = temp.iloc[-1]
                 compare_rows.append(
                     {
                         "Symbol": symbol,
                         "Latest Close": last.get("close"),
-                        "1D Return": calc_return(temp_filtered, 1),
-                        "5D Return": calc_return(temp_filtered, 5),
-                        "20D Return": calc_return(temp_filtered, 20),
-                        "Period Return": (temp_filtered["close"].iloc[-1] / temp_filtered["close"].iloc[0] - 1)
-                        if len(temp_filtered) >= 2
-                        else None,
+                        "1D Return": calc_return(temp, 1),
+                        "5D Return": calc_return(temp, 5),
+                        "20D Return": calc_return(temp, 20),
+                        "YTD Return": last.get("ret_ytd"),
+                        "Period Return": (temp["close"].iloc[-1] / temp["close"].iloc[0] - 1) if len(temp) >= 2 else None,
                         "RSI 14": last.get("rsi_14"),
                         "20D Vol": last.get("rolling_volatility_20d"),
                         "Vol Ratio": last.get("volume_ratio_20d"),
@@ -1020,14 +849,12 @@ def render_dashboard():
             compare_df = pd.DataFrame(compare_rows)
             if not compare_df.empty:
                 sortable = compare_df.copy()
-                sortable["Rank Score"] = (
-                    sortable["20D Return"].fillna(0) * 100
-                    - sortable["20D Vol"].fillna(sortable["20D Vol"].median() if "20D Vol" in sortable else 0) / 5
-                )
+                vol_fallback = sortable["20D Vol"].median() if "20D Vol" in sortable.columns else 0
+                sortable["Rank Score"] = sortable["20D Return"].fillna(0) * 100 - sortable["20D Vol"].fillna(vol_fallback) / 5
                 sortable = sortable.sort_values("Rank Score", ascending=False)
 
                 display_df = sortable.drop(columns=["Rank Score"])
-                for c in ["1D Return", "5D Return", "20D Return", "Period Return", "Dist 52W High"]:
+                for c in ["1D Return", "5D Return", "20D Return", "YTD Return", "Period Return", "Dist 52W High"]:
                     if c in display_df.columns:
                         display_df[c] = display_df[c].map(lambda x: f"{x*100:.2f}%" if pd.notna(x) else "-")
                 if "20D Vol" in display_df.columns:
@@ -1044,7 +871,7 @@ def render_dashboard():
         with compare_col_right:
             if len(compare_symbols) >= 2:
                 st.markdown("### Return Correlation")
-                st.plotly_chart(build_correlation_heatmap(compare_symbols, preset, custom_range), use_container_width=True)
+                plot_chart(build_correlation_heatmap(compare_symbols), key="correlation_heatmap")
 
     with tab5:
         st.markdown("### Watchlist Overview")
@@ -1071,12 +898,12 @@ def render_dashboard():
 
     with tab6:
         st.markdown("### Daily Data")
-        st.dataframe(daily_filtered, use_container_width=True)
-        csv_daily = daily_filtered.to_csv(index=False).encode("utf-8-sig")
+        st.dataframe(daily_df, use_container_width=True)
+        csv_daily = daily_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             "Download daily CSV",
             csv_daily,
-            file_name=f"{selected_symbol.lower()}_daily_filtered.csv",
+            file_name=f"{selected_symbol.lower()}_daily_full.csv",
             mime="text/csv",
         )
 
