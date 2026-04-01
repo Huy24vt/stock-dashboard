@@ -1,35 +1,60 @@
 name: Append intraday price every 5 minutes
+
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch: {}
+    - cron: "*/5 * * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: intraday-append-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   append-intraday:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Check Vietnam trading hours and exit if outside
         run: |
-          now=$(TZ='Asia/Ho_Chi_Minh' date +'%H:%M')
-          hour=${now:0:2}
-          minute=${now:3:2}
-          mins=$((10#$hour*60 + 10#$minute))
-          start1=$((9*60))
-          end1=$((11*60+30))
-          start2=$((13*60))
-          end2=$((15*60))
+          now=$(TZ='Asia/Ho_Chi_Minh' date +'%u %H:%M')
+          dow=$(echo "$now" | cut -d' ' -f1)
+          hm=$(echo "$now" | cut -d' ' -f2)
+          hour=${hm:0:2}
+          minute=${hm:3:2}
+          mins=$((10#$hour * 60 + 10#$minute))
+
+          # Chỉ chạy Thứ 2 - Thứ 6
+          if [ "$dow" -lt 1 ] || [ "$dow" -gt 5 ]; then
+            echo "Not a trading day ($now). Exiting."
+            exit 0
+          fi
+
+          # Phiên sáng 09:00-11:30, phiên chiều 13:00-15:00
+          start1=$((9 * 60))
+          end1=$((11 * 60 + 30))
+          start2=$((13 * 60))
+          end2=$((15 * 60))
+
           if [ $mins -lt $start1 ] || { [ $mins -gt $end1 ] && [ $mins -lt $start2 ]; } || [ $mins -gt $end2 ]; then
             echo "Outside trading hours ($now). Exiting."
             exit 0
           fi
+
+          echo "Within trading hours ($now). Continue."
 
       - name: Install dependencies
         run: |
@@ -38,4 +63,19 @@ jobs:
           pip install vnstock vnstock-data || true
 
       - name: Run intraday append
-        run: python src/update_intraday_snapshots.py
+        run: |
+          python src/update_intraday_snapshots.py
+
+      - name: Commit and push updated intraday data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/intraday/
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "auto update intraday snapshots"
+            git push
+          fi
