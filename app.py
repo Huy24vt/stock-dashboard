@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import math
+import json
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -26,7 +28,7 @@ PLOT_CONFIG = {
     "displaylogo": False,
     "responsive": True,
     "displayModeBar": True,
-    "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "eraseshape"],
+    "modeBarButtonsToAdd": ["drawline", "drawrect", "eraseshape"],
     "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"],
     "edits": {"shapePosition": True},
 }
@@ -446,7 +448,178 @@ def base_layout(fig: go.Figure, height: int):
 
 
 def plot_chart(fig: go.Figure, key: str | None = None):
-    st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG, key=key)
+    plot_height = int(fig.layout.height) if fig.layout.height else 500
+    chart_id = f"chart_{(key or 'plot').replace(' ', '_').replace('-', '_')}"
+    fig_json = fig.to_json()
+    config_json = json.dumps(PLOT_CONFIG)
+
+    html = f"""
+    <div id="{chart_id}" style="width:100%;height:{plot_height}px;"></div>
+    <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+    <script>
+    (function() {{
+        const gd = document.getElementById({json.dumps(chart_id)});
+        const fig = {fig_json};
+        const config = {config_json};
+        let selectedShapeIndex = null;
+        let history = [];
+        let historyIndex = -1;
+        let restoreDragMode = (fig.layout && fig.layout.dragmode) || 'zoom';
+        let rightDragActive = false;
+        let panTarget = null;
+
+        gd.setAttribute('tabindex', '0');
+        gd.style.outline = 'none';
+
+        function cloneShapes() {{
+            return JSON.parse(JSON.stringify((gd.layout && gd.layout.shapes) || []));
+        }}
+
+        function sameShapes(a, b) {{
+            return JSON.stringify(a || []) === JSON.stringify(b || []);
+        }}
+
+        function pushHistory(force) {{
+            const shapes = cloneShapes();
+            if (force || historyIndex < 0 || !sameShapes(history[historyIndex], shapes)) {{
+                history = history.slice(0, historyIndex + 1);
+                history.push(shapes);
+                historyIndex = history.length - 1;
+            }}
+        }}
+
+        function applyShapes(shapes) {{
+            const nextShapes = JSON.parse(JSON.stringify(shapes || []));
+            Plotly.relayout(gd, {{ shapes: nextShapes }});
+            selectedShapeIndex = null;
+            highlightSelected();
+        }}
+
+        function undoShapes() {{
+            if (historyIndex > 0) {{
+                historyIndex -= 1;
+                applyShapes(history[historyIndex]);
+            }}
+        }}
+
+        function deleteSelectedShape() {{
+            if (selectedShapeIndex === null) return;
+            const shapes = cloneShapes();
+            if (selectedShapeIndex < 0 || selectedShapeIndex >= shapes.length) return;
+            shapes.splice(selectedShapeIndex, 1);
+            history = history.slice(0, historyIndex + 1);
+            history.push(JSON.parse(JSON.stringify(shapes)));
+            historyIndex = history.length - 1;
+            applyShapes(shapes);
+        }}
+
+        function getShapeGroups() {{
+            return Array.from(gd.querySelectorAll('.shapelayer .shape-group'));
+        }}
+
+        function highlightSelected() {{
+            const groups = getShapeGroups();
+            groups.forEach((group, idx) => {{
+                group.style.filter = idx === selectedShapeIndex ? 'drop-shadow(0 0 2px #ffffff)' : '';
+                group.style.opacity = idx === selectedShapeIndex ? '1' : '';
+            }});
+        }}
+
+        function selectShapeFromEvent(target) {{
+            const group = target.closest('.shape-group');
+            const groups = getShapeGroups();
+            if (!group) return null;
+            const idx = groups.indexOf(group);
+            return idx >= 0 ? idx : null;
+        }}
+
+        function onKey(e) {{
+            const key = (e.key || '').toLowerCase();
+            if ((e.key === 'Delete' || e.key === 'Backspace') && selectedShapeIndex !== null) {{
+                e.preventDefault();
+                deleteSelectedShape();
+                return;
+            }}
+            if ((e.ctrlKey || e.metaKey) && key === 'z') {{
+                e.preventDefault();
+                undoShapes();
+            }}
+        }}
+
+        Plotly.newPlot(gd, fig.data, fig.layout, config).then(function() {{
+            pushHistory(true);
+
+            gd.on('plotly_relayout', function(eventData) {{
+                if (!eventData) return;
+                const changedKeys = Object.keys(eventData);
+                const hasShapeChange = changedKeys.some((k) => k === 'shapes' || k.startsWith('shapes['));
+                if (hasShapeChange) {{
+                    setTimeout(function() {{
+                        pushHistory(false);
+                        highlightSelected();
+                    }}, 30);
+                }}
+            }});
+
+            gd.addEventListener('click', function(e) {{
+                gd.focus();
+                const idx = selectShapeFromEvent(e.target);
+                selectedShapeIndex = idx;
+                highlightSelected();
+            }}, true);
+
+            gd.addEventListener('mouseenter', function() {{ gd.focus(); }});
+            gd.addEventListener('keydown', onKey);
+            window.addEventListener('keydown', onKey);
+
+            gd.addEventListener('contextmenu', function(e) {{
+                e.preventDefault();
+            }});
+
+            gd.addEventListener('mousedown', function(e) {{
+                if (e.button !== 2) return;
+                e.preventDefault();
+                gd.focus();
+                restoreDragMode = (gd.layout && gd.layout.dragmode) || 'zoom';
+                panTarget = gd.querySelector('.nsewdrag') || e.target;
+                rightDragActive = true;
+                Plotly.relayout(gd, {{ dragmode: 'pan' }}).then(function() {{
+                    const syntheticDown = new MouseEvent('mousedown', {{
+                        bubbles: true,
+                        cancelable: true,
+                        clientX: e.clientX,
+                        clientY: e.clientY,
+                        button: 0,
+                        buttons: 1
+                    }});
+                    panTarget.dispatchEvent(syntheticDown);
+                }});
+            }}, true);
+
+            document.addEventListener('mouseup', function(e) {{
+                if (!rightDragActive) return;
+                rightDragActive = false;
+                if (panTarget) {{
+                    const syntheticUp = new MouseEvent('mouseup', {{
+                        bubbles: true,
+                        cancelable: true,
+                        clientX: e.clientX,
+                        clientY: e.clientY,
+                        button: 0,
+                        buttons: 0
+                    }});
+                    panTarget.dispatchEvent(syntheticUp);
+                }}
+                setTimeout(function() {{
+                    Plotly.relayout(gd, {{ dragmode: restoreDragMode }});
+                }}, 0);
+            }}, true);
+        }});
+    }})();
+    </script>
+    """
+
+    components.html(html, height=plot_height + 10)
 
 
 def build_price_chart(
@@ -736,17 +909,12 @@ if st.sidebar.button("🔄 Refresh data ngay"):
     st.cache_data.clear()
     st.rerun()
 
-st.sidebar.markdown(
-    "<div class='small-note'>Mặc định: giữ chuột trái và kéo để zoom theo hình chữ nhật. Cuộn chuột để zoom in / zoom out. Trên thanh công cụ có thêm Draw line / Draw rect / Erase để tự đánh dấu đỉnh đáy.</div>",
-    unsafe_allow_html=True,
-)
 
 
 # =========================
 # HEADER
 # =========================
 st.title("📈 VN Stock Dashboard Pro")
-st.caption("Bản gọn hơn cho phân tích chứng khoán: bỏ lọc thời gian, bỏ score cards, hỗ trợ zoom bằng kéo khung và vẽ line / rect trực tiếp trên chart.")
 
 
 # =========================
@@ -772,7 +940,6 @@ def render_dashboard():
 
     with tab1:
         st.markdown("### Price & Volume")
-        st.caption("Kéo chuột để zoom vùng đang xem. Chọn biểu tượng line/rect trên thanh công cụ để tự vẽ trendline, vùng đỉnh hoặc vùng đáy.")
         plot_chart(
             build_price_chart(daily_df, chart_type, show_ma5, show_ma20, show_ma50, show_ma200, show_bollinger),
             key="price_chart",
