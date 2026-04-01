@@ -50,11 +50,10 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install vnstock
-          pip install vnstock-data
 
       - name: Verify intraday dependency
         run: |
-          python -c "from vnstock_data import Trading; print('vnstock_data import OK')"
+          python -c "from vnstock import Trading; print('vnstock import OK')"
 
       - name: Run intraday append
         run: |
