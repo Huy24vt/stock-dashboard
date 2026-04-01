@@ -74,17 +74,40 @@ def main():
 
         df = build_features(df)
 
+        # If file exists, append only new rows (avoid rewriting historical data)
         if out_file.exists():
             try:
                 old = pd.read_csv(out_file)
-                new = pd.concat([old, df], ignore_index=True).drop_duplicates(subset=["date"]).sort_values("date")
+                old.columns = [c.strip().lower() for c in old.columns]
+                if "date" in old.columns:
+                    old["date"] = pd.to_datetime(old["date"], errors="coerce")
+                    last_date = old["date"].max().date()
+                    # keep only strictly newer rows
+                    df_new = df[df["date"].dt.date > last_date].copy()
+                else:
+                    df_new = df
             except Exception:
-                new = df
-        else:
-            new = df
+                df_new = df
 
-        new.to_csv(out_file, index=False, encoding="utf-8-sig")
-        print(f"Saved {out_file} | rows={len(new)}")
+            if df_new is None or len(df_new) == 0:
+                print(f"[INFO] No new rows to append for {symbol}")
+                continue
+
+            # Ensure same columns/order as existing file
+            for c in old.columns:
+                if c not in df_new.columns:
+                    df_new[c] = pd.NA
+
+            # Add any new columns from df_new to old column list (keep df_new order)
+            df_new = df_new.reindex(columns=old.columns.tolist())
+
+            # Append to CSV without header
+            df_new.to_csv(out_file, mode="a", header=False, index=False, encoding="utf-8-sig")
+            print(f"Appended {len(df_new)} rows to {out_file}")
+        else:
+            # Write full file
+            df.to_csv(out_file, index=False, encoding="utf-8-sig")
+            print(f"Saved {out_file} | rows={len(df)}")
 
 if __name__ == "__main__":
     main()
