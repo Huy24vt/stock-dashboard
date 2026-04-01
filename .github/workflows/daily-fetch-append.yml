@@ -1,28 +1,18 @@
 name: Daily fetch and append 1D prices
 
 on:
-  schedule:
-    # 15:10 giờ Việt Nam = 08:10 UTC, chạy Thứ 2 - Thứ 6
-    - cron: "10 8 * * 1-5"
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: daily-fetch-append-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   fetch-daily:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -39,16 +29,19 @@ jobs:
         run: |
           python src/backfill_daily.py
 
+      - name: Show changed files
+        run: |
+          git status
+          ls -R data || true
+
       - name: Commit and push updated daily data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add data/daily/
-
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
             git commit -m "auto update daily stock data"
-            git push
+            git push origin HEAD:${{ github.ref_name }}
           fi
