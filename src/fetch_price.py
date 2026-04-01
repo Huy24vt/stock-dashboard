@@ -3,7 +3,7 @@ from datetime import date
 import pandas as pd
 from vnstock import Quote
 
-from config import VN30_SYMBOLS, START_DATE
+from config import SYMBOLS, START_DATE
 
 
 RAW_DIR = Path("data/raw")
@@ -30,7 +30,7 @@ def fetch_one_symbol(symbol: str, start_date: str, end_date: str):
 def main():
     end_date = date.today().strftime("%Y-%m-%d")
 
-    for symbol in VN30_SYMBOLS:
+    for symbol in SYMBOLS:
         try:
             fetch_one_symbol(symbol, START_DATE, end_date)
         except Exception as e:
