@@ -2,6 +2,8 @@ name: Append intraday price every 5 minutes
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * 1-5"
 
 permissions:
   contents: write
@@ -19,26 +21,63 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Check Vietnam trading hours and exit if outside
+        run: |
+          now=$(TZ='Asia/Ho_Chi_Minh' date +'%u %H:%M')
+          dow=$(echo "$now" | cut -d' ' -f1)
+          hm=$(echo "$now" | cut -d' ' -f2)
+          hour=${hm:0:2}
+          minute=${hm:3:2}
+          mins=$((10#$hour * 60 + 10#$minute))
+
+          if [ "$dow" -lt 1 ] || [ "$dow" -gt 5 ]; then
+            echo "Not a trading day ($now). Exiting."
+            exit 0
+          fi
+
+          start1=$((9 * 60))
+          end1=$((11 * 60 + 30))
+          start2=$((13 * 60))
+          end2=$((15 * 60))
+
+          if [ $mins -lt $start1 ] || { [ $mins -gt $end1 ] && [ $mins -lt $start2 ]; } || [ $mins -gt $end2 ]; then
+            echo "Outside trading hours ($now). Exiting."
+            exit 0
+          fi
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install vnstock vnstock-data || true
+          pip install vnstock
+          pip install vnstock-data
+
+      - name: Verify intraday dependency
+        run: |
+          python -c "from vnstock_data import Trading; print('vnstock_data import OK')"
 
       - name: Run intraday append
         run: |
           python src/update_intraday_snapshots.py
 
-      - name: Show changed files
+      - name: Show files
         run: |
-          git status
+          pwd
+          ls -R
           ls -R data || true
 
       - name: Commit and push updated intraday data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/intraday/
+
+          if [ ! -d data/intraday ]; then
+            echo "data/intraday does not exist. Nothing to commit."
+            exit 0
+          fi
+
+          git add data/intraday
+
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
