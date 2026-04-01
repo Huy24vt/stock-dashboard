@@ -25,7 +25,10 @@ PLOT_CONFIG = {
     "scrollZoom": True,
     "displaylogo": False,
     "responsive": True,
+    "displayModeBar": True,
+    "modeBarButtonsToAdd": ["drawline", "drawopenpath", "drawrect", "eraseshape"],
     "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"],
+    "edits": {"shapePosition": True},
 }
 
 # =========================
@@ -417,12 +420,24 @@ def technical_snapshot(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 # CHARTS
 # =========================
+
+
+def enable_drawing_tools(fig: go.Figure) -> go.Figure:
+    fig.update_layout(
+        dragmode="zoom",
+        newshape=dict(
+            line=dict(color="#f59e0b", width=2),
+            fillcolor="rgba(245, 158, 11, 0.08)",
+            opacity=0.9,
+        ),
+    )
+    return fig
 def base_layout(fig: go.Figure, height: int):
     fig.update_layout(
         height=height,
         margin=dict(l=20, r=20, t=70, b=20),
         hovermode="x unified",
-        dragmode="pan",
+        dragmode="zoom",
         legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0),
     )
     fig.update_xaxes(automargin=True, tickformat="%b\n%Y", nticks=8, showgrid=False)
@@ -508,7 +523,7 @@ def build_price_chart(
     fig.update_layout(xaxis_rangeslider_visible=False)
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="Volume", row=2, col=1)
-    return base_layout(fig, 760)
+    return enable_drawing_tools(base_layout(fig, 760))
 
 
 def build_return_chart(df: pd.DataFrame):
@@ -516,7 +531,7 @@ def build_return_chart(df: pd.DataFrame):
     fig.add_trace(go.Bar(x=df["date"], y=df["return_1d"] * 100, name="Daily Return (%)"))
     fig.add_hline(y=0)
     fig.update_yaxes(title_text="Return (%)")
-    return base_layout(fig, 320)
+    return enable_drawing_tools(base_layout(fig, 320))
 
 
 def build_volatility_chart(df: pd.DataFrame):
@@ -531,7 +546,7 @@ def build_volatility_chart(df: pd.DataFrame):
         )
     )
     fig.update_yaxes(title_text="Volatility (%)")
-    return base_layout(fig, 320)
+    return enable_drawing_tools(base_layout(fig, 320))
 
 
 def build_drawdown_chart(df: pd.DataFrame):
@@ -547,7 +562,7 @@ def build_drawdown_chart(df: pd.DataFrame):
     )
     fig.add_hline(y=0)
     fig.update_yaxes(title_text="Drawdown (%)")
-    return base_layout(fig, 320)
+    return enable_drawing_tools(base_layout(fig, 320))
 
 
 def build_monthly_return_chart(df: pd.DataFrame):
@@ -573,7 +588,7 @@ def build_rsi_chart(df: pd.DataFrame):
     fig.add_hline(y=70, line_dash="dash")
     fig.add_hline(y=30, line_dash="dash")
     fig.update_yaxes(title_text="RSI", range=[0, 100])
-    return base_layout(fig, 300)
+    return enable_drawing_tools(base_layout(fig, 300))
 
 
 def build_macd_chart(df: pd.DataFrame):
@@ -584,7 +599,7 @@ def build_macd_chart(df: pd.DataFrame):
     fig.add_trace(go.Bar(x=df["date"], y=df["macd_hist"], name="Histogram", marker_color=colors), row=2, col=1)
     fig.update_yaxes(title_text="MACD", row=1, col=1)
     fig.update_yaxes(title_text="Hist", row=2, col=1)
-    return base_layout(fig, 420)
+    return enable_drawing_tools(base_layout(fig, 420))
 
 
 def build_intraday_chart(df: pd.DataFrame):
@@ -628,10 +643,10 @@ def build_intraday_chart(df: pd.DataFrame):
         height=560 if vol_col else 420,
         margin=dict(l=20, r=20, t=60, b=20),
         hovermode="x unified",
-        dragmode="pan",
+        dragmode="zoom",
         legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0),
     )
-    return fig
+    return enable_drawing_tools(fig)
 
 
 def build_compare_chart(symbols: list[str]):
@@ -647,7 +662,7 @@ def build_compare_chart(symbols: list[str]):
         filtered["indexed"] = filtered["close"] / base * 100
         fig.add_trace(go.Scatter(x=filtered["date"], y=filtered["indexed"], mode="lines", name=symbol))
     fig.update_yaxes(title_text="Indexed Price (Base=100)")
-    return base_layout(fig, 430)
+    return enable_drawing_tools(base_layout(fig, 430))
 
 
 def build_correlation_heatmap(symbols: list[str]):
@@ -678,7 +693,7 @@ def build_correlation_heatmap(symbols: list[str]):
     fig.update_layout(height=360, margin=dict(l=20, r=20, t=40, b=20))
     fig.update_xaxes(side="bottom", tickangle=0, automargin=True)
     fig.update_yaxes(automargin=True)
-    return fig
+    return enable_drawing_tools(fig)
 
 
 def build_return_distribution(df: pd.DataFrame):
@@ -686,7 +701,7 @@ def build_return_distribution(df: pd.DataFrame):
     fig.add_trace(go.Histogram(x=df["return_1d"] * 100, nbinsx=40, name="Return Distribution"))
     fig.update_xaxes(title_text="Daily Return (%)")
     fig.update_yaxes(title_text="Frequency")
-    return base_layout(fig, 320)
+    return enable_drawing_tools(base_layout(fig, 320))
 
 
 # =========================
@@ -722,7 +737,7 @@ if st.sidebar.button("🔄 Refresh data ngay"):
     st.rerun()
 
 st.sidebar.markdown(
-    "<div class='small-note'>Cuộn chuột trên chart để zoom in / zoom out. Giữ chuột và kéo để pan. Double click để reset vùng nhìn.</div>",
+    "<div class='small-note'>Mặc định: giữ chuột trái và kéo để zoom theo hình chữ nhật. Cuộn chuột để zoom in / zoom out. Trên thanh công cụ có thêm Draw line / Draw rect / Erase để tự đánh dấu đỉnh đáy.</div>",
     unsafe_allow_html=True,
 )
 
@@ -731,7 +746,7 @@ st.sidebar.markdown(
 # HEADER
 # =========================
 st.title("📈 VN Stock Dashboard Pro")
-st.caption("Bản gọn hơn cho phân tích chứng khoán: bỏ lọc thời gian, bỏ score cards, tập trung vào chart và bảng dữ liệu.")
+st.caption("Bản gọn hơn cho phân tích chứng khoán: bỏ lọc thời gian, bỏ score cards, hỗ trợ zoom bằng kéo khung và vẽ line / rect trực tiếp trên chart.")
 
 
 # =========================
@@ -757,6 +772,7 @@ def render_dashboard():
 
     with tab1:
         st.markdown("### Price & Volume")
+        st.caption("Kéo chuột để zoom vùng đang xem. Chọn biểu tượng line/rect trên thanh công cụ để tự vẽ trendline, vùng đỉnh hoặc vùng đáy.")
         plot_chart(
             build_price_chart(daily_df, chart_type, show_ma5, show_ma20, show_ma50, show_ma200, show_bollinger),
             key="price_chart",
