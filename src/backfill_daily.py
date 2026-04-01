@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import pandas as pd
 from vnstock import Quote
@@ -6,6 +6,7 @@ from config import SYMBOLS, START_DATE
 
 OUT_DIR = Path("data/daily")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [c.strip().lower() for c in df.columns]
@@ -31,17 +32,59 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def main():
-    end_date = date.today().strftime("%Y-%m-%d")
+    today = date.today()
 
     for symbol in SYMBOLS:
         print(f"Backfill daily: {symbol}")
+        out_file = OUT_DIR / f"{symbol.lower()}_daily.csv"
+
+        # Determine start date for fetching: continue from last available date
+        if out_file.exists():
+            try:
+                old = pd.read_csv(out_file)
+                old.columns = [c.strip().lower() for c in old.columns]
+                if "date" in old.columns:
+                    old["date"] = pd.to_datetime(old["date"], errors="coerce")
+                    last_date = old["date"].max().date()
+                    start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+                else:
+                    start_date = START_DATE
+            except Exception:
+                start_date = START_DATE
+        else:
+            start_date = START_DATE
+
+        end_date = today.strftime("%Y-%m-%d")
+
+        # If start_date is after end_date, nothing to do
+        if pd.to_datetime(start_date).date() > today:
+            print(f"No new data for {symbol} (up-to-date: {start_date})")
+            continue
+
         quote = Quote(symbol=symbol, source="KBS")
-        df = quote.history(start=START_DATE, end=end_date, interval="1D")
+        try:
+            df = quote.history(start=start_date, end=end_date, interval="1D")
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch {symbol}: {e}")
+            continue
+
+        if df is None or len(df) == 0:
+            print(f"[INFO] No new rows for {symbol} between {start_date} and {end_date}")
+            continue
+
         df = build_features(df)
 
-        out_file = OUT_DIR / f"{symbol.lower()}_daily.csv"
-        df.to_csv(out_file, index=False, encoding="utf-8-sig")
-        print(f"Saved {out_file} | rows={len(df)}")
+        if out_file.exists():
+            try:
+                old = pd.read_csv(out_file)
+                new = pd.concat([old, df], ignore_index=True).drop_duplicates(subset=["date"]).sort_values("date")
+            except Exception:
+                new = df
+        else:
+            new = df
+
+        new.to_csv(out_file, index=False, encoding="utf-8-sig")
+        print(f"Saved {out_file} | rows={len(new)}")
 
 if __name__ == "__main__":
     main()
