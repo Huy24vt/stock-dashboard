@@ -3,6 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import math
 import json
+import os
+import uuid
+import smtplib
+from email.message import EmailMessage
 
 import pandas as pd
 import streamlit as st
@@ -23,6 +27,11 @@ DAILY_DIR = Path("data/daily")
 INTRADAY_DIR = Path("data/intraday")
 FALLBACK_SYMBOLS = ["ACB", "FPT", "HPG"]
 DEFAULT_COMPARE_COUNT = 5
+ALERTS_DIR = Path("data/alerts")
+ALERTS_FILE = ALERTS_DIR / "price_alerts.json"
+ALERT_STATE_FILE = ALERTS_DIR / "alert_state.json"
+GREEN = "#16a34a"
+RED = "#dc2626"
 PLOT_CONFIG = {
     "scrollZoom": True,
     "displaylogo": False,
@@ -67,6 +76,95 @@ def discover_symbols() -> list[str]:
 
 
 SYMBOLS = discover_symbols()
+
+
+def ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def read_json_file(path: Path, default):
+    try:
+        if not path.exists():
+            return default
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def write_json_file(path: Path, data) -> None:
+    ensure_parent_dir(path)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_alert_rules() -> list[dict]:
+    data = read_json_file(ALERTS_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def save_alert_rules(rules: list[dict]) -> None:
+    write_json_file(ALERTS_FILE, rules)
+
+
+def load_alert_state() -> dict:
+    data = read_json_file(ALERT_STATE_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_alert_state(state: dict) -> None:
+    write_json_file(ALERT_STATE_FILE, state)
+
+
+def get_secret_or_env(key: str, default=None):
+    if key in st.secrets:
+        return st.secrets[key]
+    if "alerts" in st.secrets and key in st.secrets["alerts"]:
+        return st.secrets["alerts"][key]
+    return os.getenv(key, default)
+
+
+def smtp_ready() -> bool:
+    required = [
+        get_secret_or_env("ALERT_SMTP_HOST"),
+        get_secret_or_env("ALERT_SMTP_PORT"),
+        get_secret_or_env("ALERT_SMTP_USER"),
+        get_secret_or_env("ALERT_SMTP_PASSWORD"),
+    ]
+    return all(required)
+
+
+def send_email_alert(to_email: str, subject: str, body: str) -> tuple[bool, str]:
+    host = get_secret_or_env("ALERT_SMTP_HOST")
+    port = int(get_secret_or_env("ALERT_SMTP_PORT", 587))
+    user = get_secret_or_env("ALERT_SMTP_USER")
+    password = get_secret_or_env("ALERT_SMTP_PASSWORD")
+    from_email = get_secret_or_env("ALERT_SMTP_FROM", user)
+    use_ssl = str(get_secret_or_env("ALERT_SMTP_USE_SSL", "false")).lower() == "true"
+    use_tls = str(get_secret_or_env("ALERT_SMTP_USE_TLS", "true")).lower() == "true"
+
+    if not all([host, port, user, password, from_email]):
+        return False, "Thiếu cấu hình SMTP trong secrets/env."
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = from_email
+    msg["To"] = to_email
+    msg.set_content(body)
+
+    try:
+        if use_ssl:
+            server = smtplib.SMTP_SSL(host, port, timeout=20)
+        else:
+            server = smtplib.SMTP(host, port, timeout=20)
+        with server:
+            server.ehlo()
+            if use_tls and not use_ssl:
+                server.starttls()
+                server.ehlo()
+            server.login(user, password)
+            server.send_message(msg)
+        return True, "Đã gửi email."
+    except Exception as e:
+        return False, str(e)
 
 
 def latest_intraday_file(symbol: str):
@@ -326,6 +424,138 @@ def fmt_num(x, digits=2):
     return f"{x:,.{digits}f}"
 
 
+def format_rule_condition(rule: dict) -> str:
+    condition = rule.get("condition")
+    p1 = rule.get("price_1")
+    p2 = rule.get("price_2")
+    if condition == "above":
+        return f">= {fmt_num(p1)}"
+    if condition == "below":
+        return f"<= {fmt_num(p1)}"
+    if condition == "between" and p2 is not None:
+        low, high = sorted([p1, p2])
+        return f"[{fmt_num(low)} ; {fmt_num(high)}]"
+    return "-"
+
+
+def get_latest_snapshot(symbol: str, daily_df: pd.DataFrame | None = None, intraday_df: pd.DataFrame | None = None) -> dict:
+    daily_df = daily_df if daily_df is not None else load_daily(symbol)
+    intraday_df = intraday_df if intraday_df is not None else load_intraday(symbol)[0]
+    intraday_price_col = choose_intraday_price_col(intraday_df) if not intraday_df.empty else None
+
+    if intraday_price_col and intraday_price_col in intraday_df.columns and not intraday_df[intraday_price_col].dropna().empty:
+        last_row = intraday_df.dropna(subset=[intraday_price_col]).iloc[-1]
+        return {
+            "price": float(last_row[intraday_price_col]),
+            "time": str(last_row.get("snapshot_time")),
+            "source": "intraday",
+        }
+
+    if daily_df is not None and not daily_df.empty and "close" in daily_df.columns and not daily_df["close"].dropna().empty:
+        last_row = daily_df.dropna(subset=["close"]).iloc[-1]
+        return {
+            "price": float(last_row["close"]),
+            "time": str(last_row.get("date")),
+            "source": "daily",
+        }
+
+    return {"price": None, "time": None, "source": None}
+
+
+def alert_condition_met(rule: dict, current_price: float | None) -> bool:
+    if current_price is None:
+        return False
+
+    condition = rule.get("condition")
+    price_1 = rule.get("price_1")
+    price_2 = rule.get("price_2")
+
+    if condition == "above":
+        return current_price >= price_1
+    if condition == "below":
+        return current_price <= price_1
+    if condition == "between" and price_2 is not None:
+        low, high = sorted([price_1, price_2])
+        return low <= current_price <= high
+    return False
+
+
+def check_and_send_alerts() -> list[dict]:
+    rules = load_alert_rules()
+    if not rules:
+        return []
+
+    state = load_alert_state()
+    snapshots: dict[str, dict] = {}
+    events: list[dict] = []
+
+    for rule in rules:
+        rule_id = rule.get("id")
+        if not rule_id or not rule.get("enabled", True):
+            continue
+
+        symbol = rule.get("symbol")
+        if symbol not in snapshots:
+            snapshots[symbol] = get_latest_snapshot(symbol)
+        snapshot = snapshots[symbol]
+        price = snapshot.get("price")
+        met = alert_condition_met(rule, price)
+        prev = state.get(rule_id, {})
+        was_active = bool(prev.get("active", False))
+
+        if met and not was_active:
+            subject = f"[Stock Alert] {symbol} trigger"
+            body = (
+                f"Mã: {symbol}\n"
+                f"Điều kiện: {format_rule_condition(rule)}\n"
+                f"Giá hiện tại: {fmt_num(price)}\n"
+                f"Nguồn dữ liệu: {snapshot.get('source')}\n"
+                f"Thời điểm dữ liệu: {snapshot.get('time')}\n"
+            )
+            ok, message = send_email_alert(rule.get("email", ""), subject, body)
+            if ok:
+                state[rule_id] = {
+                    "active": True,
+                    "last_sent_at": pd.Timestamp.now(tz="Asia/Ho_Chi_Minh").isoformat(),
+                    "last_price": price,
+                    "last_message": "sent",
+                }
+            else:
+                state[rule_id] = {
+                    "active": False,
+                    "last_sent_at": prev.get("last_sent_at"),
+                    "last_price": price,
+                    "last_message": f"error: {message}",
+                }
+            events.append(
+                {
+                    "symbol": symbol,
+                    "email": rule.get("email"),
+                    "condition": format_rule_condition(rule),
+                    "price": price,
+                    "sent": ok,
+                    "message": message,
+                }
+            )
+        elif not met:
+            state[rule_id] = {
+                "active": False,
+                "last_sent_at": prev.get("last_sent_at"),
+                "last_price": price,
+                "last_message": prev.get("last_message"),
+            }
+        else:
+            state[rule_id] = {
+                "active": True,
+                "last_sent_at": prev.get("last_sent_at"),
+                "last_price": price,
+                "last_message": prev.get("last_message", "sent"),
+            }
+
+    save_alert_state(state)
+    return events
+
+
 def calc_return(df: pd.DataFrame, periods: int):
     if df.empty or len(df) <= periods or "close" not in df.columns:
         return None
@@ -428,12 +658,14 @@ def enable_drawing_tools(fig: go.Figure) -> go.Figure:
     fig.update_layout(
         dragmode="zoom",
         newshape=dict(
-            line=dict(color="#f59e0b", width=2),
-            fillcolor="rgba(245, 158, 11, 0.08)",
+            line=dict(color=GREEN, width=2),
+            fillcolor="rgba(22, 163, 74, 0.05)",
             opacity=0.9,
         ),
     )
     return fig
+
+
 def base_layout(fig: go.Figure, height: int):
     fig.update_layout(
         height=height,
@@ -648,6 +880,10 @@ def build_price_chart(
                 low=df["low"],
                 close=df["close"],
                 name="OHLC",
+                increasing_line_color=GREEN,
+                increasing_fillcolor=GREEN,
+                decreasing_line_color=RED,
+                decreasing_fillcolor=RED,
             ),
             row=1,
             col=1,
@@ -659,7 +895,7 @@ def build_price_chart(
                 y=df["close"],
                 mode="lines",
                 name="Close",
-                line=dict(width=2),
+                line=dict(width=2, color=GREEN),
             ),
             row=1,
             col=1,
@@ -680,7 +916,7 @@ def build_price_chart(
         fig.add_trace(go.Scatter(x=df["date"], y=df["bb_lower"], mode="lines", name="BB Lower", opacity=0.6), row=1, col=1)
 
     if "volume" in df.columns:
-        colors = ["#2ca02c" if ret >= 0 else "#d62728" for ret in df["return_1d"].fillna(0)]
+        colors = [GREEN if ret >= 0 else RED for ret in df["return_1d"].fillna(0)]
         fig.add_trace(
             go.Bar(
                 x=df["date"],
@@ -701,7 +937,8 @@ def build_price_chart(
 
 def build_return_chart(df: pd.DataFrame):
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df["date"], y=df["return_1d"] * 100, name="Daily Return (%)"))
+    colors = [GREEN if ret >= 0 else RED for ret in df["return_1d"].fillna(0)]
+    fig.add_trace(go.Bar(x=df["date"], y=df["return_1d"] * 100, name="Daily Return (%)", marker_color=colors))
     fig.add_hline(y=0)
     fig.update_yaxes(title_text="Return (%)")
     return enable_drawing_tools(base_layout(fig, 320))
@@ -715,7 +952,7 @@ def build_volatility_chart(df: pd.DataFrame):
             y=df["rolling_volatility_20d"],
             mode="lines",
             name="20D Rolling Volatility",
-            line=dict(width=2),
+            line=dict(width=2, color=RED),
         )
     )
     fig.update_yaxes(title_text="Volatility (%)")
@@ -731,6 +968,8 @@ def build_drawdown_chart(df: pd.DataFrame):
             mode="lines",
             fill="tozeroy",
             name="Drawdown",
+            line=dict(color=RED),
+            fillcolor="rgba(220, 38, 38, 0.15)",
         )
     )
     fig.add_hline(y=0)
@@ -768,7 +1007,7 @@ def build_macd_chart(df: pd.DataFrame):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.65, 0.35])
     fig.add_trace(go.Scatter(x=df["date"], y=df["macd"], mode="lines", name="MACD"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["date"], y=df["macd_signal"], mode="lines", name="Signal"), row=1, col=1)
-    colors = ["#2ca02c" if x >= 0 else "#d62728" for x in df["macd_hist"].fillna(0)]
+    colors = [GREEN if x >= 0 else RED for x in df["macd_hist"].fillna(0)]
     fig.add_trace(go.Bar(x=df["date"], y=df["macd_hist"], name="Histogram", marker_color=colors), row=2, col=1)
     fig.update_yaxes(title_text="MACD", row=1, col=1)
     fig.update_yaxes(title_text="Hist", row=2, col=1)
@@ -793,6 +1032,7 @@ def build_intraday_chart(df: pd.DataFrame):
             y=df[price_col],
             mode="lines+markers",
             name="Price",
+            line=dict(color=GREEN),
         ),
         row=1,
         col=1,
@@ -932,11 +1172,12 @@ def render_dashboard():
     first_date = daily_df["date"].min().strftime("%Y-%m-%d")
     last_date = daily_df["date"].max().strftime("%Y-%m-%d")
     latest_close = safe_last(daily_df, "close")
+    alert_events = check_and_send_alerts()
     st.markdown(
         f"**Mã đang xem:** {selected_symbol} &nbsp;&nbsp;|&nbsp;&nbsp; **Data range:** {first_date} → {last_date} &nbsp;&nbsp;|&nbsp;&nbsp; **Latest close:** {fmt_num(latest_close)}"
     )
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Overview", "Technical", "Intraday", "Compare", "Watchlist", "Data"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Overview", "Technical", "Intraday", "Compare", "Watchlist", "Alerts", "Data"])
 
     with tab1:
         st.markdown("### Price & Volume")
@@ -1080,6 +1321,102 @@ def render_dashboard():
             st.dataframe(sorted_watchlist, use_container_width=True, hide_index=True)
 
     with tab6:
+        current_snapshot = get_latest_snapshot(selected_symbol, daily_df=daily_df, intraday_df=intraday_df)
+        rules = load_alert_rules()
+        state = load_alert_state()
+
+        top_left, top_right = st.columns([1.25, 1])
+        with top_left:
+            st.markdown("### Email Alerts")
+            with st.form("create_alert_form"):
+                alert_email = st.text_input("Email nhận notify")
+                alert_symbol = st.selectbox("Mã", SYMBOLS, index=SYMBOLS.index(selected_symbol), key="alert_symbol_input")
+                alert_type_label = st.selectbox(
+                    "Điều kiện trigger",
+                    ["Giá >= mức", "Giá <= mức", "Giá nằm trong khoảng"],
+                    index=0,
+                )
+                condition_map = {
+                    "Giá >= mức": "above",
+                    "Giá <= mức": "below",
+                    "Giá nằm trong khoảng": "between",
+                }
+                condition = condition_map[alert_type_label]
+                current_ref = float(current_snapshot.get("price") or latest_close or 0)
+                price_1 = st.number_input("Mức giá 1", min_value=0.0, value=current_ref, step=0.1, format="%.2f")
+                price_2 = None
+                if condition == "between":
+                    price_2 = st.number_input("Mức giá 2", min_value=0.0, value=current_ref, step=0.1, format="%.2f")
+                submit_alert = st.form_submit_button("Lưu alert")
+
+            if submit_alert:
+                if not alert_email.strip():
+                    st.error("Cần nhập email nhận notify.")
+                else:
+                    rules.append(
+                        {
+                            "id": uuid.uuid4().hex[:10],
+                            "symbol": alert_symbol,
+                            "email": alert_email.strip(),
+                            "condition": condition,
+                            "price_1": float(price_1),
+                            "price_2": float(price_2) if price_2 is not None else None,
+                            "enabled": True,
+                            "created_at": pd.Timestamp.now(tz="Asia/Ho_Chi_Minh").isoformat(),
+                        }
+                    )
+                    save_alert_rules(rules)
+                    st.success("Đã lưu alert.")
+                    st.rerun()
+
+        with top_right:
+            st.markdown("### Trạng thái")
+            status_rows = pd.DataFrame(
+                [
+                    {"Metric": "SMTP", "Value": "Ready" if smtp_ready() else "Missing config"},
+                    {"Metric": "Current price", "Value": fmt_num(current_snapshot.get("price"))},
+                    {"Metric": "Price source", "Value": current_snapshot.get("source") or "-"},
+                    {"Metric": "Data time", "Value": current_snapshot.get("time") or "-"},
+                    {"Metric": "Rules", "Value": len(rules)},
+                ]
+            )
+            st.dataframe(status_rows, use_container_width=True, hide_index=True)
+            if alert_events:
+                event_df = pd.DataFrame(alert_events)
+                event_df["price"] = event_df["price"].map(lambda x: fmt_num(x))
+                event_df["sent"] = event_df["sent"].map(lambda x: "Yes" if x else "No")
+                st.markdown("### Trigger vừa chạy")
+                st.dataframe(event_df, use_container_width=True, hide_index=True)
+
+        st.markdown("### Alert Rules")
+        if not rules:
+            st.info("Chưa có alert nào.")
+        else:
+            for rule in rules:
+                last_state = state.get(rule.get("id"), {})
+                col1, col2, col3, col4, col5, col6, col7 = st.columns([0.8, 1.15, 1.1, 0.6, 1.25, 0.65, 0.75])
+                col1.write(f"**{rule.get('symbol')}**")
+                col2.write(rule.get("email"))
+                col3.write(format_rule_condition(rule))
+                col4.write("On" if rule.get("enabled", True) else "Off")
+                col5.write(last_state.get("last_sent_at", "-"))
+                action_label = "Off" if rule.get("enabled", True) else "On"
+                if col6.button(action_label, key=f"toggle_rule_{rule.get('id')}"):
+                    for r in rules:
+                        if r.get("id") == rule.get("id"):
+                            r["enabled"] = not r.get("enabled", True)
+                    save_alert_rules(rules)
+                    st.rerun()
+                if col7.button("Delete", key=f"delete_rule_{rule.get('id')}"):
+                    rules = [r for r in rules if r.get("id") != rule.get("id")]
+                    save_alert_rules(rules)
+                    state.pop(rule.get("id"), None)
+                    save_alert_state(state)
+                    st.rerun()
+
+        st.caption("Alert được check khi app rerun / refresh. Nếu muốn gửi nền 24/7 thì cần cron hoặc GitHub Actions riêng.")
+
+    with tab7:
         st.markdown("### Daily Data")
         st.dataframe(daily_df, use_container_width=True)
         csv_daily = daily_df.to_csv(index=False).encode("utf-8-sig")
