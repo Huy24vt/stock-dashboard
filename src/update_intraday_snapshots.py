@@ -1,22 +1,13 @@
 from pathlib import Path
-from datetime import datetime
 import pandas as pd
-import sys
 
-# `vnstock_data` may be provided by a separate package. Try a safe import
-try:
-    from vnstock_data import Trading
-except Exception:
-    Trading = None
-
+from vnstock import Trading
 from config import SYMBOLS
 
-if Trading is None:
-    print("[WARN] vnstock_data not available — skipping intraday snapshot step.")
-    sys.exit(0)
 
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
+
 
 def main():
     now = pd.Timestamp.now(tz="Asia/Ho_Chi_Minh")
@@ -26,12 +17,19 @@ def main():
     out_dir = Path("data/intraday") / today_str
     ensure_dir(out_dir)
 
-    trading = Trading(symbol="ACB", source="vci")
+    # Theo docs hiện tại của vnstock:
+    # from vnstock import Trading
+    # Trading(source='VCI').price_board([...])
+    trading = Trading(source="VCI")
     board = trading.price_board(SYMBOLS, flatten_columns=True, drop_levels=[0])
+
+    if board is None or len(board) == 0:
+        raise ValueError("price_board trả về rỗng.")
+
     board.columns = [c.strip().lower() for c in board.columns]
 
-    # Bạn có thể in 1 lần để xác nhận đúng tên cột thực tế
-    # print(board.columns.tolist())
+    if "symbol" not in board.columns:
+        raise ValueError(f"Không tìm thấy cột 'symbol'. Columns: {board.columns.tolist()}")
 
     # Ưu tiên khớp các cột thường gặp
     price_col = next((c for c in ["match_price", "last_price", "price", "close"] if c in board.columns), None)
@@ -44,16 +42,19 @@ def main():
         raise ValueError(f"Không tìm thấy cột giá hiện tại. Columns: {board.columns.tolist()}")
 
     board["snapshot_time"] = ts_str
+    board["symbol"] = board["symbol"].astype(str).str.upper()
 
     for symbol in SYMBOLS:
-        row = board[board["symbol"].str.upper() == symbol].copy()
+        symbol = symbol.upper()
+        row = board[board["symbol"] == symbol].copy()
+
         if row.empty:
             print(f"[WARN] No row for {symbol}")
             continue
 
         keep_cols = ["snapshot_time", "symbol", price_col]
         for c in [change_col, pct_col, vol_col, ref_col]:
-            if c:
+            if c and c not in keep_cols:
                 keep_cols.append(c)
 
         row = row[keep_cols].copy()
@@ -62,11 +63,17 @@ def main():
 
         if out_file.exists():
             old = pd.read_csv(out_file)
-            row = pd.concat([old, row], ignore_index=True)
-            row = row.drop_duplicates(subset=["snapshot_time"]).sort_values("snapshot_time")
+            old.columns = [c.strip().lower() for c in old.columns]
+            row.columns = [c.strip().lower() for c in row.columns]
 
-        row.to_csv(out_file, index=False, encoding="utf-8-sig")
-        print(f"Updated {out_file} | rows={len(row)}")
+            merged = pd.concat([old, row], ignore_index=True)
+            merged = merged.drop_duplicates(subset=["snapshot_time"]).sort_values("snapshot_time")
+            merged.to_csv(out_file, index=False, encoding="utf-8-sig")
+            print(f"Updated {out_file} | rows={len(merged)}")
+        else:
+            row.to_csv(out_file, index=False, encoding="utf-8-sig")
+            print(f"Created {out_file} | rows={len(row)}")
+
 
 if __name__ == "__main__":
     main()
