@@ -2,6 +2,9 @@ name: Daily fetch and append 1D prices
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "30 15 * * *"
+      timezone: "Asia/Ho_Chi_Minh"
 
 permissions:
   contents: write
